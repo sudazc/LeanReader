@@ -1,0 +1,96 @@
+name: CI and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check frontend
+        run: npm run check
+
+      - name: Run Rust unit tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+  release:
+    name: Build and publish Windows release
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release tag matches project versions
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $cargoMetadata = cargo metadata --locked --no-deps --format-version 1 | Out-String
+          $cargoVersion = (ConvertFrom-Json $cargoMetadata).packages | Where-Object { $_.name -eq 'leanreader' } | Select-Object -ExpandProperty version
+          $versions = @($tauriVersion, $packageVersion, $cargoVersion)
+          $distinctVersions = @($versions | Select-Object -Unique)
+          if ($distinctVersions.Length -ne 1) {
+            throw "Project version mismatch: Tauri=$tauriVersion, npm=$packageVersion, Cargo=$cargoVersion"
+          }
+          if ($env:RELEASE_TAG -ne "v$tauriVersion") {
+            throw "Release tag $env:RELEASE_TAG does not match project version v$tauriVersion"
+          }
+
+      - name: Build NSIS installer
+        run: npx tauri build --bundles nsis
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: LeanReader ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: src-tauri/target/release/bundle/nsis/*_x64-setup.exe
