@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, isTauri } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { confirm, open, save } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -17,13 +18,14 @@
     Download,
     Eye,
     EyeOff,
+    FilePlus,
     FileText,
     FolderOpen,
+    House,
     Italic,
     Link,
     LogOut,
     Minus,
-    Moon,
     PanelLeftClose,
     PanelLeftOpen,
     Pencil,
@@ -32,8 +34,8 @@
     RotateCcw,
     Search,
     Save,
+    Settings,
     Square,
-    Sun,
     TextWrap,
     Trash2,
     X,
@@ -136,9 +138,11 @@
   const sessionStorageKey = "markdown-reader:session";
   const draftRecoveryStorageKey = "markdown-reader:recovery-drafts";
   const maxRecentFiles = 8;
-  const defaultFontSize = 20;
+  const defaultFontSize = 16;
   const minFontSize = 15;
   const maxFontSize = 25;
+  const defaultLineHeight = 1.8;
+  const lineHeightOptions = [1.6, 1.8, 2] as const;
   const defaultEditorIndentWidth = 2;
   const editorIndentWidths = [2, 4, 8] as const;
   const defaultOutlineWidth = 232;
@@ -155,6 +159,11 @@
   let tocVisible = $state(true);
   let outlineWidth = $state(defaultOutlineWidth);
   let fontSize = $state(defaultFontSize);
+  let lineHeight = $state<(typeof lineHeightOptions)[number]>(defaultLineHeight);
+  let restoreLastSession = $state(true);
+  let defaultOpenDirectory = $state("");
+  let appVersion = $state("0.1.0");
+  let settingsOpen = $state(false);
   let editorWordWrap = $state(true);
   let editorIndentWidth = $state(defaultEditorIndentWidth);
   let editorSplitRatio = $state(0.5);
@@ -375,6 +384,9 @@
         darkMode?: boolean;
         tocVisible?: boolean;
         fontSize?: number;
+        lineHeight?: number;
+        restoreLastSession?: boolean;
+        defaultOpenDirectory?: string;
         editorWordWrap?: boolean;
         editorIndentWidth?: number;
         outlineWidth?: number;
@@ -393,6 +405,14 @@
         typeof savedFontSize === "number" && Number.isFinite(savedFontSize)
           ? Math.min(maxFontSize, Math.max(minFontSize, savedFontSize))
           : defaultFontSize;
+      const savedLineHeight = preferences.lineHeight;
+      lineHeight = lineHeightOptions.includes(savedLineHeight as (typeof lineHeightOptions)[number])
+        ? (savedLineHeight as (typeof lineHeightOptions)[number])
+        : defaultLineHeight;
+      restoreLastSession =
+        typeof preferences.restoreLastSession === "boolean" ? preferences.restoreLastSession : true;
+      defaultOpenDirectory =
+        typeof preferences.defaultOpenDirectory === "string" ? preferences.defaultOpenDirectory : "";
       editorWordWrap =
         typeof preferences.editorWordWrap === "boolean" ? preferences.editorWordWrap : true;
       const savedIndentWidth = preferences.editorIndentWidth;
@@ -428,6 +448,9 @@
           tocVisible,
           outlineWidth,
           fontSize,
+          lineHeight,
+          restoreLastSession,
+          defaultOpenDirectory,
           editorWordWrap,
           editorIndentWidth,
           editorSplitRatio,
@@ -688,6 +711,20 @@
     }
   }
 
+  async function restoreStartupFiles() {
+    try {
+      const startupFiles = await invoke<string[]>("startup_markdown_files");
+      if (startupFiles.length) {
+        void openFiles(startupFiles);
+        return;
+      }
+    } catch {
+      // 浏览器预览中没有 Tauri 启动参数
+    }
+
+    if (restoreLastSession) void restoreSession();
+  }
+
   onMount(() => {
     try {
       const stored = localStorage.getItem(recentStorageKey);
@@ -711,30 +748,33 @@
     }
 
     restorePreferences();
+    if (isTauri()) void getVersion().then((version) => (appVersion = version)).catch(() => {});
     void restoreDraftRecovery();
-    void restoreSession();
-    const currentWindow = getCurrentWindow();
-    void currentWindow.onDragDropEvent((event) => {
-      if (event.payload.type !== "drop") return;
-      const markdownPaths = event.payload.paths.filter((path) => /\.(?:md|markdown)$/i.test(path));
-      if (markdownPaths.length < event.payload.paths.length) {
-        showNotice("仅支持拖放 .md 和 .markdown 文件");
-      }
-      if (markdownPaths.length) void openFiles(markdownPaths);
-    }).then((unlisten) => unlistenNativeEvents.push(unlisten));
-    void currentWindow.onCloseRequested((event) => {
-      if (allowConfirmedWindowClose) {
-        allowConfirmedWindowClose = false;
-        return;
-      }
-      persistSession();
-      persistDraftRecovery();
-      const dirtyIds = tabs.filter((tab) => isDirty(tab)).map((tab) => tab.id);
-      if (!dirtyIds.length) return;
-      event.preventDefault();
-      showClosePrompt(dirtyIds, true);
-    }).then((unlisten) => unlistenNativeEvents.push(unlisten));
-    externalCheckTimer = setInterval(() => void checkOpenFiles(), 2500);
+    void restoreStartupFiles();
+    if (isTauri()) {
+      const currentWindow = getCurrentWindow();
+      void currentWindow.onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") return;
+        const markdownPaths = event.payload.paths.filter((path) => /\.(?:md|markdown)$/i.test(path));
+        if (markdownPaths.length < event.payload.paths.length) {
+          showNotice("仅支持拖放 .md 和 .markdown 文件");
+        }
+        if (markdownPaths.length) void openFiles(markdownPaths);
+      }).then((unlisten) => unlistenNativeEvents.push(unlisten));
+      void currentWindow.onCloseRequested((event) => {
+        if (allowConfirmedWindowClose) {
+          allowConfirmedWindowClose = false;
+          return;
+        }
+        persistSession();
+        persistDraftRecovery();
+        const dirtyIds = tabs.filter((tab) => isDirty(tab)).map((tab) => tab.id);
+        if (!dirtyIds.length) return;
+        event.preventDefault();
+        showClosePrompt(dirtyIds, true);
+      }).then((unlisten) => unlistenNativeEvents.push(unlisten));
+      externalCheckTimer = setInterval(() => void checkOpenFiles(), 2500);
+    }
 
     const handleSaveAsKeydownCapture = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
@@ -758,6 +798,9 @@
           tabContextMenu = null;
         } else if (searchOpen) {
           closeSearch();
+        } else if (settingsOpen) {
+          settingsOpen = false;
+          document.querySelector<HTMLButtonElement>(".settings-toggle")?.focus();
         } else {
           openMenu = null;
         }
@@ -827,6 +870,7 @@
 
   async function createMarkdownDocument() {
     openMenu = null;
+    settingsOpen = false;
     closeSearch();
 
     let name = "未命名.md";
@@ -851,11 +895,13 @@
 
   async function openFiles(paths?: string[]) {
     openMenu = null;
+    settingsOpen = false;
     try {
       const selection =
         paths ??
         (await open({
           multiple: true,
+          defaultPath: defaultOpenDirectory || undefined,
           filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
         }));
       if (!selection) return;
@@ -1956,9 +2002,49 @@
     }
   }
 
-  function toggleTheme() {
-    darkMode = !darkMode;
+  function setTheme(value: string) {
+    darkMode = value === "dark";
     savePreferences();
+  }
+
+  function setReadingLineHeight(value: string) {
+    const nextValue = Number(value);
+    if (!lineHeightOptions.includes(nextValue as (typeof lineHeightOptions)[number])) return;
+    lineHeight = nextValue as (typeof lineHeightOptions)[number];
+    savePreferences();
+  }
+
+  function setReadingFontSize(value: string) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return;
+    fontSize = Math.min(maxFontSize, Math.max(minFontSize, nextValue));
+    savePreferences();
+  }
+
+  function toggleSettings() {
+    settingsOpen = !settingsOpen;
+    openMenu = null;
+  }
+
+  async function chooseDefaultOpenDirectory() {
+    try {
+      const directory = await open({ directory: true, multiple: false });
+      if (typeof directory !== "string") return;
+      defaultOpenDirectory = directory;
+      savePreferences();
+    } catch {
+      showNotice("选择默认文件夹失败，请重试。");
+    }
+  }
+
+  async function openDefaultAppsSettings() {
+    settingsOpen = false;
+    try {
+      await openUrl("ms-settings:defaultapps");
+      showNotice("请在默认应用设置中选择 LeanReader，并关联 .md 和 .markdown 文件。");
+    } catch {
+      showNotice("无法打开系统默认应用设置。");
+    }
   }
 
   function changeFontSize(amount: number) {
@@ -2353,6 +2439,17 @@
     if (target instanceof Element && !target.closest(".tab-context-menu")) {
       tabContextMenu = null;
     }
+    if (target instanceof Element && !target.closest(".settings-panel, .settings-toggle")) {
+      settingsOpen = false;
+    }
+  }
+
+  function handleSettingsKeydown(event: KeyboardEvent) {
+    if (event.key !== "Escape" || !settingsOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    settingsOpen = false;
+    document.querySelector<HTMLButtonElement>(".settings-toggle")?.focus();
   }
 
   function toggleMenu(menu: "file" | "recent" | "view" | "insert") {
@@ -2455,8 +2552,20 @@
   <title>LeanReader</title>
 </svelte:head>
 
-<main class="app-shell" class:dark={darkMode} onpointerdown={handleOuterPointerDown}>
+<main
+  class="app-shell"
+  class:dark={darkMode}
+  class:home-state={!activeTab}
+  style={`--reader-line-height:${lineHeight}`}
+  onpointerdown={handleOuterPointerDown}
+>
   <header class="titlebar">
+    {#if tabs.length === 0}
+      <div class="brand-lockup drag-region" data-tauri-drag-region>
+        <span class="brand-mark"><BookOpen size={18} strokeWidth={2.2} /></span>
+        <span class="brand-name">LeanReader</span>
+      </div>
+    {/if}
     <div class="tab-strip" bind:this={tabStripElement}>
       <div class="tab-list" role="tablist" aria-label="已打开的文档">
         {#each tabs as tab (tab.id)}
@@ -2500,14 +2609,30 @@
       </div>
     </div>
     <button
-      class="add-tab-button"
-      aria-label="打开或新建文件"
-      title="打开或新建文件"
+      class="home-page-button"
+      aria-label="首页"
+      title="返回首页"
       onclick={showHomePage}
     >
-      <Plus size={18} />
+      <House size={17} strokeWidth={1.8} />
     </button>
     <div class="tab-drag-space drag-region" data-tauri-drag-region></div>
+
+    <div class="titlebar-actions">
+      <button
+        class="titlebar-action settings-toggle"
+        aria-label="设置"
+        title="设置"
+        aria-haspopup="dialog"
+        aria-controls="settings-panel"
+        aria-expanded={settingsOpen}
+        onclick={toggleSettings}
+        onkeydown={handleSettingsKeydown}
+      >
+        <Settings size={19} strokeWidth={1.8} />
+      </button>
+      <span class="titlebar-divider" aria-hidden="true"></span>
+    </div>
 
     <div class="window-controls">
       <button aria-label="最小化" title="最小化" onclick={() => void minimizeWindow()}>
@@ -2521,6 +2646,86 @@
       </button>
     </div>
   </header>
+
+  {#if settingsOpen}
+    <div
+      class="settings-panel"
+      id="settings-panel"
+      role="dialog"
+      aria-labelledby="settings-title"
+      tabindex="-1"
+      transition:popupTransition={{ duration: 150, start: 0.97 }}
+      onkeydown={handleSettingsKeydown}
+    >
+      <h2 id="settings-title">设置</h2>
+
+      <section class="settings-section">
+        <h3>阅读外观</h3>
+        <label class="settings-row">
+          <span>主题</span>
+          <select value={darkMode ? "dark" : "light"} onchange={(event) => setTheme(event.currentTarget.value)}>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>字体大小</span>
+          <select value={fontSize} onchange={(event) => setReadingFontSize(event.currentTarget.value)}>
+            {#each Array.from({ length: maxFontSize - minFontSize + 1 }, (_, index) => minFontSize + index) as size (size)}
+              <option value={size}>{size}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>行距</span>
+          <select value={lineHeight} onchange={(event) => setReadingLineHeight(event.currentTarget.value)}>
+            <option value={1.6}>紧凑</option>
+            <option value={1.8}>标准</option>
+            <option value={2}>宽松</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>阅读行为</h3>
+        <label class="settings-row settings-switch-row">
+          <span>启动时恢复上次文件</span>
+          <input
+            type="checkbox"
+            checked={restoreLastSession}
+            onchange={(event) => { restoreLastSession = event.currentTarget.checked; savePreferences(); }}
+          />
+        </label>
+      </section>
+
+      <section class="settings-section settings-file-section">
+        <h3>文件</h3>
+        <div class="settings-row">
+          <span>默认打开目录</span>
+          <button
+            class="settings-button"
+            title={defaultOpenDirectory || "选择默认文件夹"}
+            onclick={() => void chooseDefaultOpenDirectory()}
+          >选择文件夹</button>
+        </div>
+        <div class="settings-row settings-association-row">
+          <div class="settings-copy">
+            <span>Markdown 文件</span>
+            <small>支持 .md、.markdown</small>
+          </div>
+          <button class="settings-button" onclick={() => void openDefaultAppsSettings()}>设为默认</button>
+        </div>
+      </section>
+
+      <section class="settings-section settings-about">
+        <h3>关于</h3>
+        <div class="settings-row">
+          <span>LeanReader</span>
+          <small>版本 {appVersion}</small>
+        </div>
+      </section>
+    </div>
+  {/if}
 
   {#if tabContextMenu}
     <div
@@ -2609,16 +2814,9 @@
         </button>
         {#if openMenu === "view"}
           <div class="dropdown-menu" role="menu" tabindex="-1" transition:popupTransition={{ duration: 150, start: 0.97 }} onkeydown={handleMenuKeydown}>
-            <button role="menuitem" onclick={() => { toggleOutlinePanel(); openMenu = null; }}>
-              {#if tocVisible}<PanelLeftClose size={16} />{:else}<PanelLeftOpen size={16} />{/if}
-              <span>{tocVisible ? "隐藏目录" : "显示目录"}</span>
-            </button>
-            <div class="menu-divider"></div>
             <button role="menuitem" disabled={fontSize >= maxFontSize} onclick={() => { changeFontSize(1); openMenu = null; }}><Plus size={16} /><span>增加字号</span><kbd>Ctrl++</kbd></button>
             <button role="menuitem" disabled={fontSize <= minFontSize} onclick={() => { changeFontSize(-1); openMenu = null; }}><Minus size={16} /><span>减少字号</span><kbd>Ctrl+-</kbd></button>
             <button role="menuitem" title="按住 Ctrl 并滚动鼠标滚轮可调整字号（15–25）" onclick={() => { fontSize = defaultFontSize; savePreferences(); openMenu = null; }}><RotateCcw size={16} /><span>恢复字号</span><kbd>Ctrl+0</kbd></button>
-            <div class="menu-divider"></div>
-            <button role="menuitem" onclick={toggleTheme}>{#if darkMode}<Sun size={16} />{:else}<Moon size={16} />{/if}<span>{darkMode ? "浅色主题" : "深色主题"}</span></button>
             {#if activeTab?.editing}
               <div class="menu-divider"></div>
               <span class="menu-label">编辑器</span>
@@ -2703,16 +2901,13 @@
       <button class="tool-button" aria-label="查找" title="查找当前文档 (Ctrl+F)" disabled={!activeTab || activeTab.loading || !!activeTab.error} onclick={() => { if (activeTab?.editing) editorComponent?.openSearch(); else void showSearch(); }}>
         <Search size={18} />
       </button>
-      <span class="toolbar-separator"></span>
-      <button class="tool-button theme-toggle" aria-label="深色主题" title={darkMode ? "浅色主题" : "深色主题"} aria-pressed={darkMode} onclick={toggleTheme}>
-        {#if darkMode}<Sun size={18} />{:else}<Moon size={18} />{/if}
-      </button>
     </div>
 
     {#if searchOpen && activeTab && !activeTab.loading && !activeTab.error && !activeTab.editing}
       <div
         class="search-box floating-search-box"
         role="search"
+        transition:popupTransition={{ duration: 150, start: 0.97 }}
       >
         <Search size={16} />
         <input bind:this={searchInput} bind:value={searchQuery} placeholder="查找当前文档" aria-label="查找当前文档" onkeydown={handleSearchKeydown} />
@@ -2789,28 +2984,29 @@
     {/if}
     {#if !activeTab}
       <section class="home-screen">
-        <div class="home-content">
-          <div class="home-mark"><BookOpen size={28} strokeWidth={1.6} /></div>
+        <div class="home-content" class:has-recent={recentFiles.length > 0}>
           <div class="home-actions">
-            <button class="primary-button" title="打开文件 (Ctrl+O)" onclick={() => void openFiles()}>
-              <FolderOpen size={17} /> 打开文件
+            <button class="home-action-button" aria-label="打开文件" title="打开文件 (Ctrl+O)" onclick={() => void openFiles()}>
+              <span class="home-action-copy"><FolderOpen size={18} strokeWidth={1.8} /><span>打开文件</span></span>
+              <kbd aria-hidden="true">Ctrl+O</kbd>
             </button>
-            <button class="primary-button" title="新建文件 (Ctrl+N)" onclick={() => void createMarkdownDocument()}>
-              <Plus size={17} /> 新建文件
+            <button class="home-action-button" aria-label="新建文件" title="新建文件 (Ctrl+N)" onclick={() => void createMarkdownDocument()}>
+              <span class="home-action-copy"><FilePlus size={18} strokeWidth={1.8} /><span>新建文件</span></span>
+              <kbd aria-hidden="true">Ctrl+N</kbd>
             </button>
           </div>
 
-          {#if recentFiles.length}
-            <div class="recent-section">
-              <div class="recent-heading">
-                <span>最近打开</span>
-                <button onclick={clearRecentFiles}>清空</button>
-              </div>
+          <div class="recent-section">
+            <div class="recent-heading">
+              <span>最近文件</span>
+              {#if recentFiles.length}<button onclick={clearRecentFiles}>清空</button>{/if}
+            </div>
+            {#if recentFiles.length}
               <ul class="recent-list">
                 {#each recentFiles as file (file.path)}
                   <li>
                     <button class="recent-file" title={displayPath(file.path)} onclick={() => void openPath(file.path)}>
-                      <span class="recent-file-icon"><FileText size={18} /></span>
+                      <span class="recent-file-icon"><FileText size={22} strokeWidth={1.7} /></span>
                       <span class="recent-file-copy">
                         <strong>{file.name}</strong>
                         <small>{displayPath(file.path)}</small>
@@ -2822,8 +3018,10 @@
                   </li>
                 {/each}
               </ul>
-            </div>
-          {/if}
+            {:else}
+              <div class="recent-empty">暂无最近文件</div>
+            {/if}
+          </div>
         </div>
       </section>
     {:else if activeTab.loading}
@@ -3007,32 +3205,34 @@
 
   .app-shell {
     --ease-out: cubic-bezier(0.333333, 1, 0.666667, 1);
-    --titlebar-height: 42px;
-    --toolbar-height: 52px;
+    --titlebar-height: 50px;
+    --toolbar-height: 46px;
     --toolbar-inline-padding: 18px;
-    --radius-control: 6px;
-    --radius-popover: 8px;
-    --radius-dialog: 12px;
+    --radius-control: 8px;
+    --radius-popover: 10px;
+    --radius-dialog: 14px;
     --duration-interaction: 140ms;
-    --duration-press-in: 150ms;
-    --duration-press-out: 110ms;
-    --duration-surface: 180ms;
-    --window-bg: #f4f6f8;
-    --surface: #ffffff;
-    --surface-muted: #f8f9fb;
-    --text: #28313f;
-    --muted: #596575;
-    --subtle: #657182;
-    --line: #e4e8ed;
-    --line-strong: #d7dde5;
-    --accent: #426ab8;
+    --duration-press-in: 130ms;
+    --duration-press-out: 100ms;
+    --duration-surface: 160ms;
+    --window-bg: #eef1f5;
+    --surface: #f8fafc;
+    --reading-surface: #ffffff;
+    --surface-muted: #eef3f8;
+    --surface-highlight: rgba(255, 255, 255, 0.7);
+    --text: #1f2d3d;
+    --muted: #5f7185;
+    --subtle: #8291a2;
+    --line: #dce4ed;
+    --line-strong: #cbd6e2;
+    --accent: #326bd1;
     --accent-foreground: #ffffff;
-    --accent-hover: #3d65b2;
-    --accent-soft: #edf3ff;
+    --accent-hover: #275bb7;
+    --accent-soft: #e8f0fc;
     --error: #a52229;
-    --hover: #eef1f5;
-    --code-bg: #f3f5f8;
-    --code-comment: #596575;
+    --hover: #edf3fa;
+    --code-bg: #f1f5f9;
+    --code-comment: #5f7185;
     --code-keyword: #8255b5;
     --code-string: #2b704f;
     --code-number: #a14f27;
@@ -3041,7 +3241,8 @@
     --search-hit-text: #312a1c;
     --search-hit-current-bg: #f3c654;
     --search-hit-current-outline: rgba(111, 77, 18, 0.48);
-    --shadow: 0 12px 35px rgba(29, 42, 61, 0.14);
+    --shadow: 0 14px 36px rgba(31, 49, 73, 0.16);
+    color-scheme: light;
     display: grid;
     grid-template-rows: var(--titlebar-height) var(--toolbar-height) minmax(0, 1fr);
     width: 100vw;
@@ -3053,22 +3254,25 @@
   }
 
   .app-shell.dark {
-    --window-bg: #191c21;
-    --surface: #20242a;
-    --surface-muted: #252a31;
-    --text: #e7eaf0;
-    --muted: #b8c1cc;
-    --subtle: #a4adba;
-    --line: #30363f;
-    --line-strong: #3b434e;
-    --accent: #8aa9ee;
-    --accent-foreground: #15213b;
-    --accent-hover: #b7c9f3;
-    --accent-soft: #29364e;
+    color-scheme: dark;
+    --window-bg: #151d28;
+    --surface: #1b2633;
+    --reading-surface: #1a2430;
+    --surface-muted: #202d3c;
+    --surface-highlight: rgba(255, 255, 255, 0.04);
+    --text: #e7edf5;
+    --muted: #afbdce;
+    --subtle: #8496aa;
+    --line: #2c3a4b;
+    --line-strong: #3c4d61;
+    --accent: #8ab4ff;
+    --accent-foreground: #17253a;
+    --accent-hover: #a4c5ff;
+    --accent-soft: #263b57;
     --error: #ff9095;
-    --hover: #2a3038;
-    --code-bg: #252a31;
-    --code-comment: #b8c1cc;
+    --hover: #253446;
+    --code-bg: #202c39;
+    --code-comment: #afbdce;
     --code-keyword: #c5a4eb;
     --code-string: #76c895;
     --code-number: #f0a677;
@@ -3077,7 +3281,17 @@
     --search-hit-text: #fff2cc;
     --search-hit-current-bg: #765a1f;
     --search-hit-current-outline: rgba(255, 226, 153, 0.82);
-    --shadow: 0 12px 35px rgba(0, 0, 0, 0.32);
+    --shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
+  }
+
+  .app-shell.home-state {
+    background: var(--window-bg);
+    position: relative;
+    grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
+  }
+
+  .app-shell.dark.home-state {
+    background: var(--window-bg);
   }
 
   .app-shell :global(button:focus-visible),
@@ -3097,9 +3311,16 @@
       transform var(--button-transform-duration) var(--ease-out);
   }
 
+  .app-shell :global(button svg) {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    stroke-width: 1.8px;
+  }
+
   .app-shell :global(button:active:not(:disabled):not([draggable="true"])) {
     --button-transform-duration: var(--duration-press-in);
-    transform: scale(0.97);
+    transform: scale(0.985);
   }
 
   .app-shell,
@@ -3108,7 +3329,9 @@
   .tab-shell,
   .reader-layout,
   .outline-panel,
-  .home-mark,
+  .settings-panel,
+  .dropdown-menu,
+  .tab-context-menu,
   .state-icon,
   .recent-list li,
   .recent-file-icon,
@@ -3121,7 +3344,8 @@
     transition:
       color var(--duration-surface) var(--ease-out),
       background-color var(--duration-surface) var(--ease-out),
-      border-color var(--duration-surface) var(--ease-out);
+      border-color var(--duration-surface) var(--ease-out),
+      box-shadow var(--duration-surface) var(--ease-out);
   }
 
   .titlebar {
@@ -3129,9 +3353,267 @@
     display: flex;
     align-items: stretch;
     min-width: 0;
-    background: var(--window-bg);
+    background: var(--surface);
     border-bottom: 1px solid var(--line);
+    box-shadow: none;
     user-select: none;
+  }
+
+  .brand-lockup {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 0 20px;
+    color: var(--text);
+  }
+
+  .brand-mark {
+    display: inline-flex;
+    flex: 0 0 28px;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    color: #ffffff;
+    background: linear-gradient(145deg, #3287f5, #1f73df);
+  }
+
+  .brand-name {
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: -0.15px;
+  }
+
+  .home-state .tab-strip,
+  .home-state .home-page-button,
+  .home-state .toolbar {
+    display: none;
+  }
+
+  .titlebar-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+    padding: 0 12px;
+  }
+
+  .titlebar-action {
+    display: inline-flex;
+    flex: 0 0 36px;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-control);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .titlebar-action:hover,
+  .titlebar-action[aria-expanded="true"] {
+    color: var(--text);
+    background: var(--hover);
+  }
+
+  .titlebar-action :global(svg) {
+    width: 17px;
+    height: 17px;
+    stroke-width: 1.8px;
+  }
+
+  .titlebar-divider {
+    width: 1px;
+    height: 24px;
+    margin: 0 2px 0 4px;
+    background: var(--line);
+  }
+
+  .settings-panel {
+    position: absolute;
+    top: calc(var(--titlebar-height) + 8px);
+    right: 15px;
+    z-index: 30;
+    width: min(324px, calc(100vw - 24px));
+    max-height: calc(100vh - var(--titlebar-height) - 20px);
+    padding: 18px 18px 16px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    color: var(--text);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    transform-origin: top right;
+  }
+
+  .settings-panel h2 {
+    margin: 0;
+    padding-bottom: 13px;
+    border-bottom: 1px solid var(--line);
+    font-size: 17px;
+    font-weight: 650;
+    line-height: 22px;
+  }
+
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 14px;
+    padding-top: 13px;
+    border-top: 1px solid var(--line);
+  }
+
+  .settings-section:first-of-type {
+    border-top: 0;
+    margin-top: 14px;
+    padding-top: 0;
+  }
+
+  .settings-section h3 {
+    margin: 0 0 1px;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 650;
+    line-height: 20px;
+  }
+
+  .settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    min-height: 36px;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .settings-row > span,
+  .settings-copy {
+    min-width: 0;
+  }
+
+  .settings-row select,
+  .settings-button {
+    flex: 0 0 112px;
+    width: 112px;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-control);
+    color: var(--text);
+    background: var(--surface);
+    font-size: 13px;
+  }
+
+  .settings-row select {
+    cursor: pointer;
+  }
+
+  .settings-button {
+    cursor: pointer;
+  }
+
+  .settings-button:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .settings-row select {
+    transition:
+      border-color var(--duration-interaction) var(--ease-out),
+      background-color var(--duration-interaction) var(--ease-out),
+      box-shadow var(--duration-interaction) var(--ease-out);
+  }
+
+  .settings-row select:focus-visible {
+    border-color: var(--accent);
+    outline: 0;
+    box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+
+  .settings-switch-row {
+    min-height: 34px;
+  }
+
+  .settings-switch-row input[type="checkbox"] {
+    position: relative;
+    flex: 0 0 42px;
+    width: 42px;
+    height: 24px;
+    margin: 0;
+    appearance: none;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: var(--line-strong);
+    cursor: pointer;
+    transition:
+      background-color var(--duration-interaction) var(--ease-out),
+      border-color var(--duration-interaction) var(--ease-out);
+  }
+
+  .settings-switch-row input[type="checkbox"]::after {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(25, 42, 64, 0.22);
+    content: "";
+    transition: transform var(--duration-interaction) var(--ease-out);
+  }
+
+  .settings-switch-row input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+
+  .settings-switch-row input[type="checkbox"]:checked::after {
+      transform: translateX(18px);
+  }
+
+  .settings-switch-row input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .settings-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .settings-copy small,
+  .settings-about small {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 450;
+  }
+
+  .settings-association-row {
+    min-height: 36px;
+  }
+
+  .settings-file-section {
+    gap: 3px;
+  }
+
+  .settings-about .settings-row {
+    min-height: 32px;
+  }
+
+  .settings-about {
+    gap: 8px;
   }
 
   .drag-region {
@@ -3164,9 +3646,10 @@
     gap: 2px;
   }
 
-  .add-tab-button {
+  .home-page-button {
     display: inline-flex;
     flex: 0 0 30px;
+    align-self: flex-end;
     align-items: center;
     justify-content: center;
     width: 30px;
@@ -3180,12 +3663,12 @@
     cursor: pointer;
   }
 
-  .add-tab-button:hover {
+  .home-page-button:hover {
     color: var(--text);
     background: var(--hover);
   }
 
-  .add-tab-button:focus-visible {
+  .home-page-button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
@@ -3205,8 +3688,8 @@
 
   .tab-shell.selected {
     color: var(--text);
-    background: var(--surface);
-    box-shadow: 0 1px 0 var(--surface);
+    background: var(--reading-surface);
+    box-shadow: 0 1px 0 var(--reading-surface);
   }
 
   .tab-shell:not(.selected):hover {
@@ -3369,6 +3852,7 @@
     padding: 0 var(--toolbar-inline-padding);
     border-bottom: 1px solid var(--line);
     background: var(--surface);
+    box-shadow: none;
   }
 
   .toolbar-left,
@@ -3414,7 +3898,7 @@
 
   .menu-trigger {
     font-size: 15px;
-    font-weight: 550;
+    font-weight: 560;
   }
 
   .toolbar-separator {
@@ -3429,7 +3913,7 @@
   }
 
   .tool-button {
-    width: 36px;
+    width: 34px;
     padding: 0;
   }
 
@@ -3449,7 +3933,7 @@
     min-width: 236px;
     padding: 6px;
     border: 1px solid var(--line);
-    border-radius: var(--radius-popover);
+    border-radius: 9px;
     background: var(--surface);
     box-shadow: var(--shadow);
     transform-origin: top left;
@@ -3466,7 +3950,7 @@
     border-radius: var(--radius-popover);
     color: var(--text);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow), inset 0 1px 0 var(--surface-highlight);
     transform-origin: top left;
   }
 
@@ -3518,7 +4002,22 @@
 
   .dropdown-menu button :global(svg) {
     flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    stroke-width: 1.8px;
     color: var(--muted);
+  }
+
+  .toolbar :global(svg) {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    stroke-width: 1.8px;
+  }
+
+  .toolbar .menu-trigger :global(svg) {
+    width: 14px;
+    height: 14px;
   }
 
   .dropdown-menu button span:nth-child(2) {
@@ -3543,7 +4042,7 @@
   .menu-label {
     padding: 5px 9px 4px;
     color: var(--subtle);
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 650;
   }
 
@@ -3669,7 +4168,7 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    background: var(--window-bg);
+    background: var(--surface);
   }
 
   .outline-splitter {
@@ -3748,6 +4247,7 @@
     color: var(--accent);
     background: var(--accent-soft);
     font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--accent);
   }
 
   .home-screen,
@@ -3761,7 +4261,7 @@
   }
 
   .home-screen {
-    padding: 50px 28px;
+    padding: 48px 28px;
   }
 
   .home-content {
@@ -3771,9 +4271,13 @@
     width: min(100%, 520px);
     margin: auto;
     text-align: center;
+    transform: translateY(-24px);
   }
 
-  .home-mark,
+  .home-content.has-recent {
+    transform: translateY(-30px);
+  }
+
   .state-icon {
     display: flex;
     align-items: center;
@@ -3786,10 +4290,6 @@
     background: var(--surface);
   }
 
-  .home-mark {
-    margin-bottom: 28px;
-  }
-
   .home-actions {
     display: flex;
     flex-wrap: wrap;
@@ -3799,10 +4299,62 @@
     width: 100%;
   }
 
-  .home-actions .primary-button {
-    flex: 0 1 176px;
+  .home-action-button {
+    display: inline-flex;
+    flex: 1 1 0;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
     min-height: 44px;
-    margin: 0;
+    padding: 0 12px 0 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    color: var(--text);
+    background: var(--surface);
+    font-size: 15px;
+    font-weight: 600;
+    box-shadow: 0 1px 2px rgba(31, 49, 73, 0.045);
+    cursor: pointer;
+    transition:
+      color var(--duration-interaction) var(--ease-out),
+      background-color var(--duration-interaction) var(--ease-out),
+      border-color var(--duration-interaction) var(--ease-out),
+      transform var(--button-transform-duration) var(--ease-out),
+      box-shadow var(--duration-interaction) var(--ease-out);
+  }
+
+  .home-action-copy {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    gap: 9px;
+    white-space: nowrap;
+  }
+
+  .home-action-button :global(svg) {
+    flex: 0 0 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--accent);
+    stroke-width: 1.8px;
+  }
+
+  .home-action-button kbd {
+    flex: 0 0 auto;
+    padding: 4px 5px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--subtle);
+    background: var(--surface-muted);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+  }
+
+  .home-action-button:hover {
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--line-strong));
+    background: var(--accent-soft);
   }
 
   .primary-button,
@@ -3828,7 +4380,7 @@
 
   .recent-section {
     width: 100%;
-    margin-top: 38px;
+    margin-top: 27px;
     text-align: left;
   }
 
@@ -3836,15 +4388,15 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 7px;
-    padding: 0 5px;
-    color: var(--muted);
+    margin-bottom: 9px;
+    padding: 0;
+    color: var(--text);
     font-size: 15px;
     font-weight: 650;
   }
 
   .recent-heading button {
-    padding: 4px 5px;
+    padding: 4px 0;
     border: 0;
     color: var(--subtle);
     background: transparent;
@@ -3856,10 +4408,20 @@
     color: var(--accent);
   }
 
+  .recent-empty {
+    display: flex;
+    align-items: center;
+    min-height: 54px;
+    padding: 0 8px;
+    border-top: 1px solid var(--line);
+    color: var(--subtle);
+    font-size: 14px;
+  }
+
   .recent-list {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 0;
     margin: 0;
     padding: 0;
     list-style: none;
@@ -3869,13 +4431,18 @@
     display: flex;
     align-items: center;
     min-width: 0;
-    min-height: 58px;
-    padding: 3px 5px;
-    border-radius: var(--radius-popover);
+    min-height: 68px;
+    padding: 3px 4px;
+    border-radius: 7px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .recent-list li:last-child {
+    border-bottom: 0;
   }
 
   .recent-list li:hover {
-    background: var(--surface);
+    background: var(--hover);
   }
 
   .recent-file {
@@ -3883,8 +4450,8 @@
     align-items: center;
     flex: 1;
     min-width: 0;
-    gap: 11px;
-    padding: 4px 6px;
+    gap: 12px;
+    padding: 5px 8px;
     border: 0;
     color: var(--text);
     background: transparent;
@@ -3896,19 +4463,24 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    flex: 0 0 32px;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-control);
+    flex: 0 0 26px;
+    width: 26px;
+    height: 28px;
     color: var(--accent);
-    background: var(--accent-soft);
+    background: transparent;
+  }
+
+  .recent-file-icon :global(svg) {
+    width: 17px;
+    height: 17px;
+    stroke-width: 1.8px;
   }
 
   .recent-file-copy {
     display: flex;
     flex-direction: column;
     min-width: 0;
-    gap: 4px;
+    gap: 3px;
   }
 
   .recent-file-copy strong,
@@ -3920,12 +4492,12 @@
 
   .recent-file-copy strong {
     font-size: 15px;
-    font-weight: 600;
+    font-weight: 650;
   }
 
   .recent-file-copy small {
     color: var(--muted);
-    font-size: 14px;
+    font-size: 13px;
   }
 
   .remove-recent {
@@ -3947,6 +4519,7 @@
     min-height: 0;
     overflow: auto;
     overscroll-behavior: contain;
+    background: var(--window-bg);
     scrollbar-color: var(--line-strong) transparent;
     scrollbar-width: thin;
   }
@@ -3959,7 +4532,7 @@
     min-height: 0;
     grid-template-rows: minmax(0, 1fr);
     overflow: hidden;
-    background: var(--surface);
+    background: var(--window-bg);
   }
 
   .editor-source-pane,
@@ -4029,14 +4602,19 @@
   }
 
   .reader-content {
-    width: min(100%, 780px);
-    min-height: 100%;
-    margin: 0 auto;
-    padding: 52px 48px 100px;
+    width: min(calc(100% - 48px), 960px);
+    min-height: calc(100% - 40px);
+    margin: 20px auto;
+    padding: 52px clamp(44px, 7vw, 82px) 88px;
+    box-sizing: border-box;
+    border: 1px solid var(--line);
+    border-radius: 12px;
     color: var(--text);
-    font-size: 20px;
+    background: var(--reading-surface);
+    box-shadow: 0 2px 8px rgba(31, 49, 73, 0.055);
+    font-size: var(--reader-font-size, 20px);
     font-weight: 450;
-    line-height: 1.8;
+    line-height: var(--reader-line-height, 1.8);
     overflow-wrap: anywhere;
     user-select: text;
   }
@@ -4389,7 +4967,6 @@
     .tab-shell,
     .reader-layout,
     .outline-panel,
-    .home-mark,
     .state-icon,
     .recent-list li,
     .recent-file-icon,
@@ -4640,7 +5217,7 @@
   @media (max-width: 560px) {
     .titlebar {
       --window-controls-width: 102px;
-      height: 42px;
+      height: var(--titlebar-height);
     }
 
     .window-controls button {
@@ -4680,6 +5257,18 @@
       padding: 34px 18px;
     }
 
+    .home-content.has-recent {
+      transform: translateY(-30px);
+    }
+
+    .home-content:not(.has-recent) {
+      transform: translateY(-14px);
+    }
+
+    .home-action-button kbd {
+      display: none;
+    }
+
     .recent-section {
       margin-top: 25px;
     }
@@ -4703,6 +5292,7 @@
     .app-shell.dark {
       --window-bg: #ffffff;
       --surface: #ffffff;
+      --reading-surface: #ffffff;
       --surface-muted: #f8f9fb;
       --text: #20242a;
       --muted: #424b57;
@@ -4764,7 +5354,11 @@
       min-height: 0 !important;
       margin: 0 !important;
       padding: 0 !important;
+      border: 0 !important;
+      border-radius: 0 !important;
       color: #20242a !important;
+      background: #ffffff !important;
+      box-shadow: none !important;
     }
 
     .editor-split {

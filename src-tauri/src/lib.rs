@@ -171,6 +171,22 @@ fn read_markdown(path: String) -> Result<MarkdownDocument, String> {
 }
 
 #[tauri::command]
+fn startup_markdown_files() -> Vec<String> {
+    std::env::args()
+        .skip(1)
+        .filter(|argument| {
+            Path::new(argument)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("md")
+                        || extension.eq_ignore_ascii_case("markdown")
+                })
+        })
+        .collect()
+}
+
+#[tauri::command]
 fn get_markdown_version(path: String) -> Result<MarkdownFileStatus, String> {
     let requested_path = Path::new(&path);
     let parent = requested_path
@@ -485,6 +501,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            startup_markdown_files,
             read_markdown,
             get_markdown_version,
             write_markdown,
